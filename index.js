@@ -312,6 +312,37 @@ io.on("connection", (socket) => {
     }
   }
 
+  socket.on("force-play", (roomId, timestamp) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+
+    // Force update room state regardless of who sent it (if they have permission)
+    if (room.host === socket.id || !room.isLocked) {
+      console.log(`🚨 FORCE PLAY in ${roomId} at ${timestamp}s`);
+      room.isPlaying = true;
+      room.currentTime = timestamp;
+      room.lastSyncTime = Date.now();
+
+      // Broadcast to EVERYONE including sender
+      io.to(roomId).emit("force-play", timestamp);
+    }
+  });
+
+  socket.on("force-pause", (roomId, timestamp) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+
+    if (room.host === socket.id || !room.isLocked) {
+      console.log(`🚨 FORCE PAUSE in ${roomId} at ${timestamp}s`);
+      room.isPlaying = false;
+      room.currentTime = timestamp;
+      room.lastSyncTime = Date.now();
+
+      // Broadcast to EVERYONE including sender
+      io.to(roomId).emit("force-pause", timestamp);
+    }
+  });
+
   socket.on("disconnect", (reason) => {
     console.log("🔴 User disconnected:", socket.id, "Reason:", reason);
 
