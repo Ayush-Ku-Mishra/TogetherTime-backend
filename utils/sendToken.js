@@ -1,20 +1,20 @@
-import jwt from 'jsonwebtoken';
+import jwt from "jsonwebtoken";
 
 export const sendToken = (user, statusCode, message, res) => {
   try {
     // Generate token based on whether user is Mongoose document or plain object
     let token;
-    if (typeof user.generateToken === 'function') {
+    if (typeof user.generateToken === "function") {
       // User is a Mongoose document
       token = user.generateToken();
     } else {
       // User is a plain object from direct MongoDB access
-      const id = typeof user._id === 'object' ? user._id.toString() : user._id;
+      const id = typeof user._id === "object" ? user._id.toString() : user._id;
       token = jwt.sign({ id }, process.env.JWT_SECRET_KEY, {
-        expiresIn: process.env.JWT_EXPIRE || '7d',
+        expiresIn: process.env.JWT_EXPIRE || "7d",
       });
     }
-    
+
     console.log("Token generated successfully");
 
     // Cookie settings
@@ -25,7 +25,7 @@ export const sendToken = (user, statusCode, message, res) => {
       ),
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "Lax",
+      sameSite: process.env.NODE_ENV === "production" ? "None" : "Lax",
     };
 
     res.status(statusCode).cookie("token", token, cookieOptions).json({
