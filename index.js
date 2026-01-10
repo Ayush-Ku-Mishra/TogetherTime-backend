@@ -47,6 +47,7 @@ const io = new Server(server, {
       "http://localhost:3001",
       "https://togethertime.netlify.app",
     ],
+    credentials: true,
     methods: ["GET", "POST"],
   },
   pingTimeout: 60000,
