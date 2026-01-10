@@ -1,15 +1,42 @@
+import dotenv from "dotenv";
+dotenv.config();
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
+import jwt from "jsonwebtoken";
+import { User } from "./models/User.js";
+import cookieParser from "cookie-parser";
+import userRouter from "./routes/userRoutes.js";
+import messageRoutes from "./routes/messageRoutes.js";
+import recentSearchRoutes from "./routes/recentSearchRoutes.js";
+import searchRoutes from "./routes/searchRoutes.js";
+import { errorMiddleware } from "./middlewares/error.js";
+import { connection } from "./database/db.js";
 
 const app = express();
-app.use(cors());
+app.use(cookieParser());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "https://togethertime.netlify.app"],
+    credentials: true,
+  })
+);
+
+app.use("/api/v1/user", userRouter);
+app.use("/api/v1/messages", messageRoutes);
+app.use("/api/v1/recent-searches", recentSearchRoutes);
+app.use("/api/v1/search", searchRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok", rooms: Object.keys(rooms).length });
 });
+
+// Connect to MongoDB
+connection();
 
 const server = http.createServer(app);
 
@@ -49,11 +76,43 @@ const broadcastRoomState = (roomId) => {
   }
 };
 
+io.use(async (socket, next) => {
+  try {
+    const cookieHeader = socket.handshake.headers.cookie;
+    if (!cookieHeader) return next(new Error("Not authenticated"));
+
+    const cookies = {};
+    cookieHeader.split(";").forEach((cookie) => {
+      const [name, ...rest] = cookie.trim().split("=");
+      cookies[name] = rest.join("=");
+    });
+
+    const token = cookies.token;
+    if (!token) return next(new Error("Not authenticated"));
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+    const user = await User.findById(decoded.id);
+
+    if (!user || !user.accountVerified) {
+      return next(new Error("Unauthorized"));
+    }
+
+    socket.user = user; // 🔥 MAIN LINE
+    next();
+  } catch (err) {
+    next(new Error("Authentication failed"));
+  }
+});
+
 /* ---------------- SOCKET LOGIC ---------------- */
 
 io.on("connection", (socket) => {
   const clientId = socket.handshake.auth.clientId;
-  console.log("🟢 User connected:", socket.id, "ClientId:", clientId);
+  console.log(
+    "🟢 User connected:",
+    socket.user.name,
+    socket.user._id.toString()
+  );
 
   let currentRoomId = null;
 
@@ -319,7 +378,7 @@ io.on("connection", (socket) => {
       const user = {
         id: socket.id,
         clientId: userClientId,
-        name: userData?.name || `Guest_${socket.id.slice(0, 4)}`,
+        name: socket.user.name,
         isHost: isFirstUser,
         isMuted: userData?.isMuted ?? false,
         joinedAt: Date.now(),
@@ -1609,19 +1668,19 @@ io.on("connection", (socket) => {
     }
 
     // Clean up video call
-if (currentRoomId) {
-  const room = getRoom(currentRoomId);
-  if (room && room.videoCallParticipants) {
-    room.videoCallParticipants = room.videoCallParticipants.filter(
-      (id) => id !== socket.id
-    );
-    
-    // Notify others that user left video call
-    socket.to(currentRoomId).emit("video-user-left", {
-      oderId: socket.id,
-    });
-  }
-}
+    if (currentRoomId) {
+      const room = getRoom(currentRoomId);
+      if (room && room.videoCallParticipants) {
+        room.videoCallParticipants = room.videoCallParticipants.filter(
+          (id) => id !== socket.id
+        );
+
+        // Notify others that user left video call
+        socket.to(currentRoomId).emit("video-user-left", {
+          oderId: socket.id,
+        });
+      }
+    }
 
     // Mark as disconnected, don't remove yet
     user.isDisconnected = true;
@@ -1680,6 +1739,8 @@ if (currentRoomId) {
     }, 30000);
   });
 });
+
+app.use(errorMiddleware);
 
 const PORT = process.env.PORT || 5000;
 
