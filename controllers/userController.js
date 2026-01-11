@@ -6,6 +6,8 @@ import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { User } from "../models/User.js";
 import { connection, getCollection } from "../database/db.js";
+import cloudinary from "../utils/cloudinary.js";
+import fs from "fs";
 
 // Register new user
 export const register = async (req, res) => {
@@ -755,3 +757,341 @@ export const updatePassword = catchAsyncError(async (req, res, next) => {
     );
   }
 });
+
+export const updateProfile = catchAsyncError(async (req, res, next) => {
+  const userId = req.user._id;
+  const { name, username, bio } = req.body;
+
+  if (!userId) {
+    return next(new ErrorHandler("User ID not found", 400));
+  }
+
+  if (!name || !username) {
+    return next(new ErrorHandler("Name and username are required", 400));
+  }
+
+  // Limit bio length
+  if (bio && bio.length > 150) {
+    return next(new ErrorHandler("Bio cannot exceed 150 characters", 400));
+  }
+
+  try {
+    // Get users collection
+    const UserCollection = getCollection("users");
+
+    // Check if username is already taken by another user
+    if (username !== req.user.username) {
+      const existingUser = await UserCollection.findOne({ 
+        username, 
+        _id: { $ne: userId } 
+      });
+
+      if (existingUser) {
+        return next(new ErrorHandler("Username is already taken", 400));
+      }
+    }
+
+    // Update user profile
+    await UserCollection.updateOne(
+      { _id: userId },
+      {
+        $set: {
+          name,
+          username,
+          bio: bio || "",
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    // Get updated user data
+    const updatedUser = await UserCollection.findOne({ _id: userId });
+
+    // Format response data to match what frontend expects
+    const userData = {
+      _id: updatedUser._id,
+      name: updatedUser.name,
+      email: updatedUser.email,
+      role: updatedUser.role,
+      status: updatedUser.status,
+      accountVerified: updatedUser.accountVerified,
+      createdAt: updatedUser.createdAt,
+      last_login_date: updatedUser.last_login_date,
+
+      // Additional profile fields
+      displayName: updatedUser.name,
+      username: updatedUser.username,
+      bio: updatedUser.bio || "",
+      avatar: updatedUser.avatar || "",
+      location: updatedUser.location || "",
+      followers: updatedUser.followers?.length || 0,
+      following: updatedUser.following?.length || 0,
+      watch_hours: updatedUser.watch_hours || 0
+    };
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: userData
+    });
+  } catch (error) {
+    console.error("Profile update error:", error);
+    return next(new ErrorHandler("Failed to update profile. Please try again.", 500));
+  }
+});
+
+export const userAvatarController = catchAsyncError(async (req, res, next) => {
+  const userId = req.user?._id;
+  const file = req.file;
+
+  const options = {
+    user_filename: true,
+    unique_filename: false,
+    overwrite: false,
+    folder: "togethertime_avatars", // Organize in folders
+    transformation: [
+      { width: 300, height: 300, crop: "fill" }, // Optimize image size
+      { quality: "auto" }, // Auto quality optimization
+    ],
+  };
+
+  if (!userId) {
+    return next(new ErrorHandler("User ID not found in request.", 400));
+  }
+
+  if (!file) {
+    return next(new ErrorHandler("No image file provided.", 400));
+  }
+
+  try {
+    // Get users collection
+    const UserCollection = getCollection("users");
+    
+    // Find the user
+    const user = await UserCollection.findOne({ _id: userId });
+
+    if (!user) {
+      return next(new ErrorHandler("User not found.", 404));
+    }
+    
+    // Step 1: Get the old avatar URL to delete later
+    const oldAvatarUrl = user.avatar;
+    let oldPublicId = null;
+
+    // Extract public_id from old avatar URL if it exists and is from Cloudinary
+    if (oldAvatarUrl && oldAvatarUrl.includes("cloudinary.com")) {
+      try {
+        // Extract public_id from Cloudinary URL
+        const urlParts = oldAvatarUrl.split("/");
+        const uploadIndex = urlParts.findIndex((part) => part === "upload");
+        if (uploadIndex !== -1 && urlParts[uploadIndex + 2]) {
+          // Get folder and filename part
+          const folderAndFile = urlParts.slice(uploadIndex + 2).join("/");
+          // Remove file extension
+          oldPublicId = folderAndFile.replace(/\.[^/.]+$/, "");
+        }
+      } catch (error) {
+        console.warn("Could not extract public_id from old avatar URL:", error);
+      }
+    }
+
+    // Step 2: Upload new image to Cloudinary
+    const result = await cloudinary.uploader.upload(file.path, options);
+
+    // Step 3: Clean up local file
+    fs.unlinkSync(file.path);
+
+    // Step 4: Update user avatar in database
+    await UserCollection.updateOne(
+      { _id: userId },
+      { 
+        $set: { 
+          avatar: result.secure_url,
+          updatedAt: new Date()
+        } 
+      }
+    );
+    
+    // Get updated user
+    const updatedUser = await UserCollection.findOne({ _id: userId });
+
+    // Step 5: Delete old image from Cloudinary (if exists)
+    if (oldPublicId) {
+      try {
+        await cloudinary.uploader.destroy(oldPublicId);
+        console.log(`Old avatar deleted: ${oldPublicId}`);
+      } catch (deleteError) {
+        // Don't fail the request if old image deletion fails
+        console.warn("Failed to delete old avatar:", deleteError);
+      }
+    }
+
+    // Format user data for response
+    const userData = {
+      _id: updatedUser._id,
+      name: updatedUser.name,
+      displayName: updatedUser.name,
+      username: updatedUser.username || updatedUser.email.split('@')[0],
+      email: updatedUser.email,
+      avatar: result.secure_url,
+      bio: updatedUser.bio || "",
+      // Include other user data as needed
+    };
+
+    res.status(200).json({
+      success: true,
+      message: "Avatar uploaded successfully.",
+      user: userData
+    });
+  } catch (error) {
+    console.error("Avatar upload error:", error);
+
+    // Clean up local file if upload fails
+    if (fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
+
+    return next(
+      new ErrorHandler("Image upload failed. Please try again.", 500)
+    );
+  }
+});
+
+export const removeAvatar = catchAsyncError(async (req, res, next) => {
+  const userId = req.user?._id;
+
+  if (!userId) {
+    return next(new ErrorHandler("User ID not found in request.", 400));
+  }
+
+  try {
+    // Get users collection
+    const UserCollection = getCollection("users");
+    
+    // Find the user
+    const user = await UserCollection.findOne({ _id: userId });
+
+    if (!user) {
+      return next(new ErrorHandler("User not found.", 404));
+    }
+    
+    // Get the avatar URL to delete from Cloudinary
+    const avatarUrl = user.avatar;
+    
+    if (avatarUrl && avatarUrl.includes("cloudinary.com")) {
+      // Extract public_id from Cloudinary URL
+      try {
+        const urlParts = avatarUrl.split("/");
+        const uploadIndex = urlParts.findIndex((part) => part === "upload");
+        if (uploadIndex !== -1 && urlParts[uploadIndex + 2]) {
+          // Get folder and filename part
+          const folderAndFile = urlParts.slice(uploadIndex + 2).join("/");
+          // Remove file extension
+          const publicId = folderAndFile.replace(/\.[^/.]+$/, "");
+          
+          // Delete image from Cloudinary
+          await cloudinary.uploader.destroy(publicId);
+        }
+      } catch (error) {
+        console.warn("Error deleting image from Cloudinary:", error);
+        // Continue anyway - we'll still clear the avatar field
+      }
+    }
+    
+    // Clear the avatar field in the database
+    await UserCollection.updateOne(
+      { _id: userId },
+      { 
+        $set: { 
+          avatar: "",
+          updatedAt: new Date()
+        } 
+      }
+    );
+    
+    // Get updated user
+    const updatedUser = await UserCollection.findOne({ _id: userId });
+    
+    // Format user data for response
+    const userData = {
+      _id: updatedUser._id,
+      name: updatedUser.name,
+      displayName: updatedUser.name,
+      username: updatedUser.username || updatedUser.email.split('@')[0],
+      email: updatedUser.email,
+      avatar: "",
+      bio: updatedUser.bio || "",
+      // Include other user data as needed
+    };
+
+    res.status(200).json({
+      success: true,
+      message: "Avatar removed successfully.",
+      user: userData
+    });
+  } catch (error) {
+    console.error("Avatar removal error:", error);
+    return next(
+      new ErrorHandler("Failed to remove avatar. Please try again.", 500)
+    );
+  }
+});
+
+export const getProfileByUsername = async (req, res) => {
+  try {
+    const { username } = req.query;
+    
+    if (!username) {
+      return res.status(400).json({
+        success: false,
+        message: "Username is required"
+      });
+    }
+    
+    // Get users collection
+    const UserCollection = getCollection("users");
+    
+    // Find the user by username
+    const user = await UserCollection.findOne({ username });
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+    
+    // Check if viewing own profile (compare with logged in user)
+    const isOwnProfile = req.user ? 
+      user._id.toString() === req.user._id.toString() : false;
+    
+    // Format response data
+    const userData = {
+      _id: user._id,
+      name: user.name,
+      displayName: user.name,
+      username: user.username,
+      bio: user.bio || "",
+      avatar: user.avatar || "",
+      joinedDate: new Date(user.createdAt).toLocaleDateString('en-US', { 
+        month: 'long', year: 'numeric' 
+      }),
+      followers: user.followers?.length || 0,
+      following: user.following?.length || 0,
+      watch_hours: user.watch_hours || 0,
+      rooms_created: user.rooms_created || [],
+      isOwnProfile
+    };
+    
+    return res.status(200).json({
+      success: true,
+      user: userData
+    });
+  } catch (error) {
+    console.error("Error fetching profile:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+};
